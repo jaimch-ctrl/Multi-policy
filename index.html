@@ -99,6 +99,22 @@ td.group-start, th.group-start{border-left:2.5px solid var(--border)!important}
 td.total-start, th.total-start{border-left:3px solid var(--ink)!important}
 .status-note{font-family:'Noto Sans TC',sans-serif;font-size:10px;color:var(--muted);font-weight:700;white-space:normal;min-width:70px}
 
+/* ── Per-year ratio table ── */
+.ratio-section{margin-top:10px;border-top:1.5px dashed var(--border2);padding-top:10px}
+.ratio-section-title{font-size:10px;font-weight:900;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin-bottom:8px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ratio-mode-toggle{display:flex;gap:6px;flex-wrap:wrap}
+.ratio-mode-toggle label{display:flex;align-items:center;gap:4px;font-size:11px;font-weight:600;cursor:pointer;color:var(--ink2);background:var(--paper2);border:1.5px solid var(--border);border-radius:6px;padding:3px 9px;transition:all .2s}
+.ratio-mode-toggle input[type=radio]{accent-color:var(--A);width:13px;height:13px}
+.ratio-mode-toggle label:has(input:checked){background:var(--A-bg);border-color:var(--A-bd);color:var(--A)}
+.ratio-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:6px;margin-top:8px}
+.ratio-row{display:flex;align-items:center;gap:5px;background:var(--paper2);border:1.5px solid var(--border2);border-radius:7px;padding:5px 8px}
+.ratio-row label{font-size:10px;font-weight:700;color:var(--muted);min-width:36px;white-space:nowrap}
+.ratio-row input{width:52px;border:1.5px solid var(--border);border-radius:5px;padding:4px 6px;font-family:'DM Mono',monospace;font-size:12px;font-weight:700;color:var(--ink);background:var(--paper);outline:none;text-align:right}
+.ratio-row input:focus{border-color:var(--A)}
+.ratio-row .pct{font-size:10px;color:var(--muted);font-weight:700}
+.ratio-row.auto-fill{background:var(--warn-bg);border-color:#ddc060}
+.ratio-row.auto-fill label{color:var(--warn)}
+td.pct-cell{font-family:'DM Mono',monospace;font-size:11px;color:var(--purple);font-weight:700}
 </style>
 </head>
 <body>
@@ -133,7 +149,7 @@ td.total-start, th.total-start{border-left:3px solid var(--ink)!important}
     <div class="sg G">
       <h4>提領設定</h4>
       <div class="f"><label>年領目標 (TWD)</label><input id="targetTWD" type="number" value="120000" step="5000"></div>
-      <div class="f"><label>試算年數</label><input id="years" type="number" value="12" min="1" max="30"></div>
+      <div class="f"><label>試算年數</label><input id="years" type="number" value="12" min="1" max="30" onchange="rebuildAllRatioGrids();recalc()"></div>
     </div>
     <div class="sg G">
       <h4>年份與匯率</h4>
@@ -315,9 +331,26 @@ function addPolicy(data={}){
         </div>
         <div class="help">每張保單都可填官方解約金 / 期初本金表，也可另外填年度利息 / 增值金表。若有年度增值表，系統優先用增值表；沒有才用官方表差額或利率推估。</div>
       </div>
+    </div>
+    <div class="ratio-section">
+      <div class="ratio-section-title">
+        📊 每年提領比例設定
+        <div class="ratio-mode-toggle">
+          <label><input type="radio" name="ratio_mode_${id}" value="priority" checked onchange="toggleRatioMode(${id})"> 順位制（依順位填滿）</label>
+          <label><input type="radio" name="ratio_mode_${id}" value="ratio" onchange="toggleRatioMode(${id})"> 比例制（每年自訂 %）</label>
+        </div>
+      </div>
+      <div id="ratioBox_${id}" style="display:none">
+        <div style="font-size:10.5px;color:var(--muted);font-weight:500;margin-bottom:6px;line-height:1.7">
+          每年輸入此保單應承擔的比例（%）。未填寫 = 沿用上一年。若所有保單比例合計未達100%，缺口依順位自動補滿。
+        </div>
+        <div class="ratio-grid" id="ratioGrid_${id}"></div>
+        <button class="btn-small" style="margin-top:8px;font-size:11px;padding:6px 12px" onclick="fillRatioEvenly(${id})">平均分配重填</button>
+      </div>
     </div>`;
   document.getElementById('policyList').appendChild(div);
   toggleFixed(id);
+  buildRatioGrid(id);
   recalc();
 }
 function updatePolicyTitle(id){
@@ -398,6 +431,75 @@ function plannedGrowth(policy, yearIndex, baseStart, actualStart){
   if(actualStart <= 0) return 0;
   return Math.max(0, baseGrowth);
 }
+// ── Ratio helpers ─────────────────────────────────────────────────────
+function toggleRatioMode(id){
+  const mode = document.querySelector(`input[name="ratio_mode_${id}"]:checked`)?.value||'priority';
+  const box = document.getElementById(`ratioBox_${id}`);
+  if(box) box.style.display = mode==='ratio' ? 'block' : 'none';
+  recalc();
+}
+
+function buildRatioGrid(id){
+  const years = +document.getElementById('years').value||12;
+  const grid = document.getElementById(`ratioGrid_${id}`);
+  if(!grid) return;
+  // Preserve existing values
+  const existing = {};
+  grid.querySelectorAll('.ratio-row').forEach(row=>{
+    const yr = +row.dataset.yr;
+    const inp = row.querySelector('input');
+    if(inp && inp.value!=='') existing[yr] = inp.value;
+  });
+  grid.innerHTML = '';
+  for(let y=1;y<=years;y++){
+    const row = document.createElement('div');
+    row.className = 'ratio-row';
+    row.dataset.yr = y;
+    const hasVal = existing[y]!==undefined && existing[y]!=='';
+    row.innerHTML = `<label>第${y}年</label><input type="number" min="0" max="100" step="1" placeholder="沿用" value="${hasVal?existing[y]:''}" title="${hasVal?'':'未填寫將沿用上一年比例'}" onchange="recalc()"><span class="pct">%</span>`;
+    grid.appendChild(row);
+  }
+}
+
+function fillRatioEvenly(id){
+  const grid = document.getElementById(`ratioGrid_${id}`);
+  if(!grid) return;
+  // Count active policies using ratio mode
+  const activePolicies = [...document.querySelectorAll('.policy-card')].filter(c=>{
+    const pid = c.id.replace('policy_','');
+    return document.querySelector(`input[name="ratio_mode_${pid}"]:checked`)?.value==='ratio';
+  });
+  const share = activePolicies.length>0 ? Math.round(100/activePolicies.length) : 100;
+  grid.querySelectorAll('input').forEach(inp=>{ inp.value=share; });
+  recalc();
+}
+
+function getRatioForPolicy(id, yearIndex){
+  // yearIndex is 0-based; year label is 1-based
+  const mode = document.querySelector(`input[name="ratio_mode_${id}"]:checked`)?.value||'priority';
+  if(mode!=='ratio') return null; // null = use priority mode
+  const grid = document.getElementById(`ratioGrid_${id}`);
+  if(!grid) return null;
+  const rows = grid.querySelectorAll('.ratio-row');
+  let lastVal = null;
+  for(let r of rows){
+    const yr = +r.dataset.yr;
+    const inp = r.querySelector('input');
+    const v = inp.value!=='' ? +inp.value : null;
+    if(v!==null) lastVal = v;
+    if(yr === yearIndex+1) return lastVal; // carry-forward
+  }
+  return lastVal;
+}
+
+// Rebuild ratio grids when year count changes
+function rebuildAllRatioGrids(){
+  document.querySelectorAll('.policy-card').forEach(card=>{
+    const id = card.id.replace('policy_','');
+    buildRatioGrid(id);
+  });
+}
+
 function recalc(){
   syncHeader();
   const FX=+document.getElementById('fx').value||31;
@@ -414,33 +516,79 @@ function recalc(){
     const items=[];
     let totalAsset=0,totalGrowth=0,totalWithdraw=0;
 
-    for(const p of policies){
+    // ── Step 1: compute each policy's start/growth ──
+    const policyData = policies.map(p=>{
       const start = getPolicyStart(p, i);
       const baseStart = getPolicyBaseStart(p, i, start);
       const growth = plannedGrowth(p, i, baseStart, start);
-      let takeGrowth=0,takePrincipal=0;
+      return {p, start, baseStart, growth};
+    });
 
-      if((i+1)>=p.startYear){
-        takeGrowth=Math.min(growth,need);
-        need-=takeGrowth;
-        if(need>0 && p.canPrincipal){
-          const capLeft=p.cap>0?Math.max(0,p.cap-p.capUsed):Infinity;
-          const available=Math.max(0,start-p.floor);
-          takePrincipal=Math.min(need,available,capLeft);
-          need-=takePrincipal;
-          p.capUsed+=takePrincipal;
-          p.principalTaken+=takePrincipal;
+    // ── Step 2: determine ratio-mode allocation ──
+    // For ratio-mode policies, reserve their share of targetUSD first
+    // For priority-mode policies, fill remaining need in order
+    const ratioAlloc = {}; // policyId -> allocated USD
+    let ratioTotal = 0;
+    for(const {p} of policyData){
+      if((i+1) < p.startYear) continue;
+      const r = getRatioForPolicy(p.id, i);
+      if(r !== null){
+        const alloc = targetUSD * (r/100);
+        ratioAlloc[p.id] = alloc;
+        ratioTotal += alloc;
+      }
+    }
+    // Remaining need after ratio allocations
+    let priorityNeed = Math.max(0, targetUSD - ratioTotal);
+
+    // ── Step 3: process each policy ──
+    for(const {p, start, baseStart, growth} of policyData){
+      let takeGrowth=0, takePrincipal=0;
+
+      if((i+1) >= p.startYear){
+        const ratioMode = getRatioForPolicy(p.id, i) !== null;
+        let myNeed;
+
+        if(ratioMode){
+          // Use ratio allocation
+          myNeed = ratioAlloc[p.id] || 0;
+        } else {
+          // Priority mode: take from remaining need
+          myNeed = priorityNeed;
+        }
+
+        takeGrowth = Math.min(growth, myNeed);
+        myNeed -= takeGrowth;
+
+        if(myNeed > 0 && p.canPrincipal){
+          const capLeft = p.cap>0 ? Math.max(0,p.cap-p.capUsed) : Infinity;
+          const available = Math.max(0, start-p.floor);
+          takePrincipal = Math.min(myNeed, available, capLeft);
+          myNeed -= takePrincipal;
+          p.capUsed += takePrincipal;
+          p.principalTaken += takePrincipal;
+        }
+
+        if(!ratioMode){
+          const actualTaken = takeGrowth + takePrincipal;
+          priorityNeed = Math.max(0, priorityNeed - actualTaken);
         }
       }
 
-      const withdraw=takeGrowth+takePrincipal;
-      const end=Math.max(0,start+growth-withdraw);
-      p.balance=end;
-      totalAsset+=end;
-      totalGrowth+=growth;
-      totalWithdraw+=withdraw;
-      items.push({name:p.name,start,growth,withdraw,end,takeGrowth,takePrincipal,baseStart});
+      const withdraw = takeGrowth + takePrincipal;
+      const end = Math.max(0, start + growth - withdraw);
+      p.balance = end;
+      totalAsset += end;
+      totalGrowth += growth;
+      totalWithdraw += withdraw;
+
+      // Compute actual % of target this policy contributed
+      const pctOfTarget = targetUSD > 0 ? (withdraw / targetUSD * 100) : 0;
+      items.push({name:p.name, id:p.id, start, growth, withdraw, end, takeGrowth, takePrincipal, baseStart, pctOfTarget});
     }
+
+    // Update need for shortfall reporting
+    need = Math.max(0, targetUSD - totalWithdraw);
 
     rows.push({
       year:i+1,
@@ -484,9 +632,9 @@ function applyManualSummary(){
 }
 function renderTable(rows,policies,FX){
   let h=`<tr><th rowspan="2" style="text-align:left;color:#b8b0a0;min-width:88px">年度<br>年齡</th>`;
-  policies.forEach((p,idx)=>h+=`<th colspan="4" class="group-start">${p.name}</th>`);
+  policies.forEach((p,idx)=>h+=`<th colspan="5" class="group-start">${p.name}</th>`);
   h+=`<th colspan="3" class="total-start">整合合計</th><th rowspan="2">狀態</th></tr><tr>`;
-  policies.forEach(()=>h+=`<th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th>`);
+  policies.forEach(()=>h+=`<th class="group-start">期初本金</th><th>年利息/增值</th><th>本年領回</th><th>期末餘額</th><th>實際%</th>`);
   h+=`<th class="total-start">總資產</th><th>總領USD</th><th>總領TWD</th></tr>`;
   document.getElementById('thead').innerHTML=h;
 
@@ -497,7 +645,9 @@ function renderTable(rows,policies,FX){
     // 表格底色統一，不用顏色標示
     let html=`<td class="yr-cell">${r.roc}年<br><span style="font-size:10px;color:var(--muted)">${r.ad} ${r.age?`${r.age}歲`:''}</span>${r.shortfall>0.5?`<br><span style="font-size:9px;color:var(--red)">缺 ${Math.round(r.shortfall*FX).toLocaleString()}</span>`:''}</td>`;
     r.items.forEach(it=>{
-      html+=`<td class="group-start">${Math.round(it.start).toLocaleString()}</td><td class="ic">＋${Math.round(it.growth).toLocaleString()}</td><td class="wd">${it.withdraw>0?'－'+Math.round(it.withdraw).toLocaleString():'—'}</td><td>${Math.round(it.end).toLocaleString()}</td>`;
+      const pct = it.pctOfTarget>0 ? it.pctOfTarget.toFixed(1)+'%' : '—';
+      const pctStyle = it.pctOfTarget>0 ? 'pct-cell' : 'pct-cell" style="color:var(--muted)';
+      html+=`<td class="group-start">${Math.round(it.start).toLocaleString()}</td><td class="ic">＋${Math.round(it.growth).toLocaleString()}</td><td class="wd">${it.withdraw>0?'－'+Math.round(it.withdraw).toLocaleString():'—'}</td><td>${Math.round(it.end).toLocaleString()}</td><td class="${pctStyle}">${pct}</td>`;
     });
     const cls=r.totalTWD>=115000?'twd-ok':(r.totalTWD>=90000?'twd-ne':'twd-sh');
     const note = r.shortfall>0.5 ? `缺口 ${Math.round(r.shortfall*FX).toLocaleString()} TWD` : (idx>0 && r.totalAsset<rows[idx-1].totalAsset ? '總資產下降' : '達成');
@@ -510,7 +660,7 @@ function renderTable(rows,policies,FX){
   const last=rows[rows.length-1];
   const trG=document.createElement('tr');
   trG.className='grand';
-  trG.innerHTML=`<td colspan="${1+policies.length*4}" style="text-align:right;font-family:'Noto Sans TC',sans-serif;font-size:10.5px;letter-spacing:.06em">${rows.length} 年累計</td><td>${Math.round(last.totalAsset).toLocaleString()}</td><td>${Math.round(sumUSD).toLocaleString()}</td><td>${Math.round(sumUSD*FX).toLocaleString()}</td><td></td>`;
+  trG.innerHTML=`<td colspan="${1+policies.length*5}" style="text-align:right;font-family:'Noto Sans TC',sans-serif;font-size:10.5px;letter-spacing:.06em">${rows.length} 年累計</td><td>${Math.round(last.totalAsset).toLocaleString()}</td><td>${Math.round(sumUSD).toLocaleString()}</td><td>${Math.round(sumUSD*FX).toLocaleString()}</td><td></td>`;
   tb.appendChild(trG);
 }
 function renderCharts(rows,policies,targetTWD,FX){
@@ -557,6 +707,7 @@ function resetDefault(){
   addPolicy({
     name:'保單 C',company:'保誠人壽',no:'82013902',start:27445,rate:2.6,mode:'hybrid',fixed:'27445,31103,39400,40433,41523,42589,43670,44708,45789,46875,48049,49267,50502,51834,53216,54662,56173,57531',startYear:9,priority:3,canPrincipal:'1'
   });
+  rebuildAllRatioGrids();
 }
 setToday();
 syncHeader();
